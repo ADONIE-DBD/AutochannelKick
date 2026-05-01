@@ -1,32 +1,14 @@
-# AutochannelKick Vencord Plugin
+# AutochannelKick
 
-Adds:
+Vencord userplugin that adds Autochannel Kick and Shitter Vault.
 
-• Autochannel Kick button  
-• Shitter Vault auto-kick system  
-• Searchable vault UI  
+## Install
 
----
+You need Git and Node.js installed first.
 
-# Install
+Open PowerShell and run:
 
-Clone Vencord source:
-
-In PowerShell
-git clone https://github.com/Vendicated/Vencord.git
-
-
-Place plugin inside:
-src/userplugins/AutochannelKick/index.tsx
-
-
-Then run:
-pnpm install
-pnpm build
-pnpm inject
-
-Restart Discord.
-
----
-
-Requires Vencord **source install**, not installer version.
+```powershell
+git clone https://github.com/YOURUSERNAME/AutochannelKick.git
+cd AutochannelKick
+powershell -ExecutionPolicy Bypass -File install.ps1
