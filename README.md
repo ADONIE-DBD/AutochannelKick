@@ -7,8 +7,5 @@ Install Git and Node.js first:
 
 Then open PowerShell and run:
 
-First line:
 ```powershell
-
-Second Line:
 irm https://raw.githubusercontent.com/ADONIE-DBD/AutochannelKick/main/install.ps1 | iex
