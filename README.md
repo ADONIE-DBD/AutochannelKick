@@ -1,14 +1,14 @@
-# AutochannelKick
+# Install
 
-Vencord userplugin that adds Autochannel Kick and Shitter Vault.
+Install Git and Node.js first:
 
-## Install
+- https://git-scm.com/download/win
+- https://nodejs.org
 
-You need Git and Node.js installed first.
+Then open PowerShell and run:
 
-Open PowerShell and run:
-
+First line:
 ```powershell
-git clone https://github.com/ADONIE-DBD/AutochannelKick.git
-cd AutochannelKick
-powershell -ExecutionPolicy Bypass -File install.ps1
+
+Second Line:
+irm https://raw.githubusercontent.com/ADONIE-DBD/AutochannelKick/main/install.ps1 | iex
