@@ -1,3 +1,46 @@
+## Requirements
+
+Install these first:
+
+- Git: https://git-scm.com/download/win
+- Node.js LTS: https://nodejs.org
+
+---
+
+# Automatic Install (Recommended)
+
+Open PowerShell and run:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned
+
+irm https://raw.githubusercontent.com/ADONIE-DBD/AutochannelKick/main/install.ps1 | iex
+
+Set-ExecutionPolicy -ExecutionPolicy Restricted
+```
+
+This installs the Vencord source build into:
+
+```text
+C:\Vencord
+```
+
+and automatically installs the AutochannelKick plugin.
+
+After installation:
+
+```text
+Restart Discord
+```
+
+Then enable:
+
+```text
+Settings → Vencord → Plugins → AutochannelKick
+```
+
+---
+
 # Manual Installation
 
 ## Requirements
@@ -6,6 +49,10 @@ Install these first:
 
 - Git: https://git-scm.com/download/win
 - Node.js LTS: https://nodejs.org
+
+If you do not already have a Vencord source build installed, download it here:
+
+- Vencord: [Vendicated/Vencord GitHub](https://github.com/Vendicated/Vencord?utm_source=chatgpt.com)
 
 ---
 
