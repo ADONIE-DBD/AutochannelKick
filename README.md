@@ -1,3 +1,21 @@
+````md
+# AutochannelKick
+
+Adds:
+
+- Kick Shitter button
+- Shitter Vault
+- Auto kick toggle
+- Import / Export IDs
+- Discord-style vault UI
+- Automatic VC kicking for saved users
+
+---
+
+# Vencord Edition
+
+Installs directly into normal Discord using a Vencord source build.
+
 ## Requirements
 
 Install these first:
@@ -52,13 +70,9 @@ Install these first:
 
 If you do not already have a Vencord source build installed, download it here:
 
-- Vencord: [Vendicated/Vencord GitHub](https://github.com/Vendicated/Vencord?utm_source=chatgpt.com)
+- Vencord: https://github.com/Vendicated/Vencord
 
 ---
-
-# Manual Installation
-
-If you already have a Vencord source build and want to install the plugin manually:
 
 ## 1. Open your Vencord folder
 
@@ -162,3 +176,163 @@ Do NOT move the Vencord folder after installation.
 
 The Vencord source build stores internal references to its install location.
 Moving the folder can break Discord loading.
+
+---
+
+# Vesktop Edition
+
+Runs completely separately from normal Discord.
+
+This version does NOT modify your normal Discord installation.
+
+---
+
+## Automatic Install (Recommended)
+
+Open PowerShell and run:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned
+
+irm https://raw.githubusercontent.com/ADONIE-DBD/AutochannelKick/main/vesktop-install.ps1 | iex
+
+Set-ExecutionPolicy -ExecutionPolicy Restricted
+```
+
+This automatically:
+
+- Downloads Vesktop
+- Installs Vesktop
+- Creates the plugins folder
+- Installs AutochannelKick
+
+After installation:
+
+```text
+Restart Vesktop
+```
+
+Then enable:
+
+```text
+Settings → Vencord → Plugins → AutochannelKick
+```
+
+---
+
+# Manual Vesktop Installation
+
+## 1. Download Vesktop
+
+- Vesktop: https://vesktop.dev
+
+---
+
+## 2. Open the Vesktop folder
+
+Press:
+
+```text
+Win + R
+```
+
+Paste:
+
+```text
+%appdata%\vesktop
+```
+
+---
+
+## 3. Create a plugins folder
+
+Inside the Vesktop folder create:
+
+```text
+plugins
+```
+
+Result:
+
+```text
+vesktop
+ └── plugins
+```
+
+---
+
+## 4. Create the plugin folder
+
+Inside `plugins` create:
+
+```text
+AutochannelKick
+```
+
+Result:
+
+```text
+vesktop
+ └── plugins
+     └── AutochannelKick
+```
+
+---
+
+## 5. Download this repository
+
+Click:
+
+```text
+Code → Download ZIP
+```
+
+Extract the ZIP.
+
+---
+
+## 6. Copy plugin files
+
+Copy all plugin files into:
+
+```text
+%appdata%\vesktop\plugins\AutochannelKick
+```
+
+Make sure:
+
+```text
+index.tsx
+```
+
+is directly inside the folder.
+
+Example:
+
+```text
+AutochannelKick
+ └── index.tsx
+```
+
+---
+
+## 7. Restart Vesktop
+
+Completely close Vesktop and reopen it.
+
+---
+
+## 8. Enable the plugin
+
+Open:
+
+```text
+Settings → Vencord → Plugins
+```
+
+Enable:
+
+```text
+AutochannelKick
+```
+````
