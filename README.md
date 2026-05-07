@@ -1,4 +1,4 @@
-````md
+````md id="3dg64r"
 # AutochannelKick
 
 Adds:
@@ -32,7 +32,7 @@ Open PowerShell and run:
 ```powershell
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned
 
-irm https://raw.githubusercontent.com/ADONIE-DBD/AutochannelKick/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/ADONIE-DBD/AutochannelKick/main/AutochannelKick-Vencord-Setup.ps1 | iex
 
 Set-ExecutionPolicy -ExecutionPolicy Restricted
 ````
