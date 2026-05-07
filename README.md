@@ -35,7 +35,7 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned
 irm https://raw.githubusercontent.com/ADONIE-DBD/AutochannelKick/main/install.ps1 | iex
 
 Set-ExecutionPolicy -ExecutionPolicy Restricted
-```
+````
 
 This installs the Vencord source build into:
 
@@ -65,12 +65,12 @@ Settings → Vencord → Plugins → AutochannelKick
 
 Install these first:
 
-- Git: https://git-scm.com/download/win
-- Node.js LTS: https://nodejs.org
+* Git: https://git-scm.com/download/win
+* Node.js LTS: https://nodejs.org
 
 If you do not already have a Vencord source build installed, download it here:
 
-- Vencord: https://github.com/Vendicated/Vencord
+* Vencord: https://github.com/Vendicated/Vencord
 
 ---
 
@@ -187,7 +187,7 @@ This version does NOT modify your normal Discord installation.
 
 ---
 
-## Automatic Install (Recommended)
+# Automatic Install (Recommended)
 
 Open PowerShell and run:
 
@@ -201,10 +201,10 @@ Set-ExecutionPolicy -ExecutionPolicy Restricted
 
 This automatically:
 
-- Downloads Vesktop
-- Installs Vesktop
-- Creates the plugins folder
-- Installs AutochannelKick
+* Downloads Vesktop
+* Installs Vesktop
+* Creates the plugins folder
+* Installs AutochannelKick
 
 After installation:
 
@@ -224,7 +224,7 @@ Settings → Vencord → Plugins → AutochannelKick
 
 ## 1. Download Vesktop
 
-- Vesktop: https://vesktop.dev
+* Vesktop: https://vesktop.dev
 
 ---
 
@@ -335,4 +335,6 @@ Enable:
 ```text
 AutochannelKick
 ```
-````
+
+```
+```
