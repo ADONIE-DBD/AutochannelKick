@@ -7,7 +7,9 @@ Install Git and Node.js first:
 
 Then open PowerShell and run:
 
+```powershell
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned
 
-```powershell
 irm https://raw.githubusercontent.com/ADONIE-DBD/AutochannelKick/main/install.ps1 | iex
+
+Set-ExecutionPolicy -ExecutionPolicy Restricted
