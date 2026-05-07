@@ -13,3 +13,8 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned
 irm https://raw.githubusercontent.com/ADONIE-DBD/AutochannelKick/main/install.ps1 | iex
 
 Set-ExecutionPolicy -ExecutionPolicy Restricted
+```
+
+Restart Discord after installation. 
+
+Enable the plugin: Settings → Vencord → Plugins → AutochannelKick
