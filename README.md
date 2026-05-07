@@ -1,4 +1,3 @@
-````md
 # Manual Installation
 
 ## Requirements
@@ -150,4 +149,3 @@ Do NOT move the Vencord folder after installation.
 
 The Vencord source build stores internal references to its install location.
 Moving the folder can break Discord loading.
-````
