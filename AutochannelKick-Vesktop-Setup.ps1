@@ -1,50 +1,61 @@
 $ErrorActionPreference = "Stop"
 
 Write-Host ""
-Write-Host "=== AutochannelKick Vesktop Installer ==="
+Write-Host "=== AutochannelKick Vesktop Source Installer ==="
 Write-Host ""
 
-$VesktopInstaller = "$env:TEMP\Vesktop-Setup.exe"
-$PluginsPath = "$env:APPDATA\vesktop\plugins\AutochannelKick"
-$TempPlugin = "$env:TEMP\AutochannelKick"
-
-Write-Host "Downloading Vesktop..."
-
-$ReleaseApi = "https://api.github.com/repos/Vencord/Vesktop/releases/latest"
-$Release = Invoke-RestMethod $ReleaseApi
-
-$Asset = $Release.assets | Where-Object {
-    $_.name -like "Vesktop-Setup-*.exe"
-} | Select-Object -First 1
-
-if (!$Asset) {
-    Write-Host "Could not find Vesktop Windows installer."
+if (!(Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "Git is required: https://git-scm.com/download/win"
     pause
     exit
 }
 
-Invoke-WebRequest -Uri $Asset.browser_download_url -OutFile $VesktopInstaller
+if (!(Get-Command node -ErrorAction SilentlyContinue)) {
+    Write-Host "Node.js LTS is required: https://nodejs.org"
+    pause
+    exit
+}
 
-Write-Host "Installing Vesktop..."
-Start-Process $VesktopInstaller -Wait
+if (!(Get-Command pnpm -ErrorAction SilentlyContinue)) {
+    Write-Host "Installing pnpm..."
+    npm install -g pnpm
+}
 
-Write-Host "Creating plugin folder..."
-New-Item -ItemType Directory -Force -Path $PluginsPath | Out-Null
+$VesktopPath = "C:\Vesktop"
+$PluginTemp = "$env:TEMP\AutochannelKick"
+$PluginDest = "$VesktopPath\src\userplugins\AutochannelKick"
 
-if (Test-Path $TempPlugin) {
-    Remove-Item $TempPlugin -Recurse -Force
+if (!(Test-Path $VesktopPath)) {
+    Write-Host "Downloading Vesktop source..."
+    git clone https://github.com/Vencord/Vesktop.git $VesktopPath
+}
+
+if (Test-Path $PluginTemp) {
+    Remove-Item $PluginTemp -Recurse -Force
 }
 
 Write-Host "Downloading AutochannelKick..."
-git clone https://github.com/ADONIE-DBD/AutochannelKick.git $TempPlugin
+git clone https://github.com/ADONIE-DBD/AutochannelKick.git $PluginTemp
 
-Write-Host "Installing plugin..."
-Copy-Item "$TempPlugin\AutochannelKick\*" $PluginsPath -Recurse -Force
+Write-Host "Installing plugin into src/userplugins..."
+if (Test-Path $PluginDest) {
+    Remove-Item $PluginDest -Recurse -Force
+}
+
+New-Item -ItemType Directory -Force -Path $PluginDest | Out-Null
+Copy-Item "$PluginTemp\AutochannelKick\*" $PluginDest -Recurse -Force
+
+Set-Location $VesktopPath
+
+Write-Host "Installing dependencies..."
+pnpm install
+
+Write-Host "Building Vesktop..."
+pnpm build
+
+Write-Host "Starting Vesktop source build..."
+pnpm start
 
 Write-Host ""
-Write-Host "Done."
-Write-Host "Restart Vesktop."
-Write-Host "Then enable AutochannelKick in Settings -> Vencord -> Plugins."
-Write-Host ""
-
+Write-Host "Done. Enable AutochannelKick in Settings -> Vencord -> Plugins."
 pause
