@@ -194,7 +194,7 @@ Open PowerShell and run:
 ```powershell
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned
 
-irm https://raw.githubusercontent.com/ADONIE-DBD/AutochannelKick/main/vesktop-install.ps1 | iex
+irm https://raw.githubusercontent.com/ADONIE-DBD/AutochannelKick/main/AutochannelKick-Vesktop-Setup.ps1 | iex
 
 Set-ExecutionPolicy -ExecutionPolicy Restricted
 ```
