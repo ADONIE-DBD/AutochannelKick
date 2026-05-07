@@ -8,17 +8,22 @@ $VesktopInstaller = "$env:TEMP\Vesktop-Setup.exe"
 $PluginsPath = "$env:APPDATA\vesktop\plugins\AutochannelKick"
 $TempPlugin = "$env:TEMP\AutochannelKick"
 
-if (!(Get-Command git -ErrorAction SilentlyContinue)) {
-    Write-Host "Git is required. Install Git first:"
-    Write-Host "https://git-scm.com/download/win"
+Write-Host "Downloading Vesktop..."
+
+$ReleaseApi = "https://api.github.com/repos/Vencord/Vesktop/releases/latest"
+$Release = Invoke-RestMethod $ReleaseApi
+
+$Asset = $Release.assets | Where-Object {
+    $_.name -like "Vesktop-Setup-*.exe"
+} | Select-Object -First 1
+
+if (!$Asset) {
+    Write-Host "Could not find Vesktop Windows installer."
     pause
     exit
 }
 
-Write-Host "Downloading Vesktop..."
-Invoke-WebRequest `
-    -Uri "https://github.com/Vencord/Vesktop/releases/latest/download/Vesktop-Setup.exe" `
-    -OutFile $VesktopInstaller
+Invoke-WebRequest -Uri $Asset.browser_download_url -OutFile $VesktopInstaller
 
 Write-Host "Installing Vesktop..."
 Start-Process $VesktopInstaller -Wait
