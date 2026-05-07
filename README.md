@@ -17,4 +17,6 @@ Set-ExecutionPolicy -ExecutionPolicy Restricted
 
 Restart Discord after installation. 
 
-Enable the plugin: Settings → Vencord → Plugins → AutochannelKick
+Enable the plugin: 
+
+Settings → Vencord → Plugins → AutochannelKick
