@@ -2,7 +2,7 @@ import { findGroupChildrenByChildId, NavContextMenuPatchCallback } from "@api/Co
 import { DataStore } from "@api/index";
 import definePlugin from "@utils/types";
 import { findByPropsLazy } from "@webpack";
-import { FluxDispatcher, Menu, SelectedGuildStore } from "@webpack/common";
+import { ChannelRouter, ComponentDispatch, FluxDispatcher, Menu, SelectedChannelStore, SelectedGuildStore } from "@webpack/common";
 
 const ChannelStore = findByPropsLazy("getChannel", "getMutableGuildChannelsForGuild");
 const UserStore = findByPropsLazy("getUser", "getCurrentUser");
@@ -28,7 +28,11 @@ let autoKickGuildId: string | null = null;
 let autoKickChannelId: string | null = null;
 
 const recentlyKicked = new Set<string>();
-const lastKnownVoiceChannel = new Map<string, string | null>();
+
+// Discord only has one active composer. Keep command executions in order so two
+// vaulted users joining at once cannot type into, or navigate away from, each
+// other's slash-command form.
+let kickQueue: Promise<void> = Promise.resolve();
 
 function sleep(ms: number) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -278,22 +282,36 @@ function findAcCommandsChannel(guildId: string) {
     return null;
 }
 
-function goToChannel(guildId: string, channelId: string) {
-    const url = `/channels/${guildId}/${channelId}`;
-    window.history.pushState({}, "", url);
-    window.dispatchEvent(new PopStateEvent("popstate"));
+function goToChannel(channelId: string) {
+    ChannelRouter.transitionToChannel(channelId);
 }
 
-async function insertText(editor: HTMLElement, text: string) {
-    editor.focus();
+function insertText(text: string) {
+    ComponentDispatch.dispatchToLastSubscribed("INSERT_TEXT", {
+        rawText: text,
+        plainText: text
+    });
+}
 
-    const data = new DataTransfer();
-    data.setData("text/plain", text);
+function getComposer() {
+    return document.querySelector(
+        '[data-slate-editor="true"][contenteditable="true"], [role="textbox"][contenteditable="true"]'
+    ) as HTMLElement | null;
+}
 
-    editor.dispatchEvent(new ClipboardEvent("paste", {
-        clipboardData: data,
-        bubbles: true
-    }));
+async function waitForComposer(channelId: string, timeoutMs = 5000) {
+    const endsAt = Date.now() + timeoutMs;
+
+    while (Date.now() < endsAt) {
+        if (SelectedChannelStore.getChannelId() === channelId) {
+            const editor = getComposer();
+            if (editor) return editor;
+        }
+
+        await sleep(50);
+    }
+
+    return null;
 }
 
 async function pressEnter(editor: HTMLElement) {
@@ -321,28 +339,27 @@ async function pressEnter(editor: HTMLElement) {
 }
 
 async function runSlashCommand(userId: string) {
-    await sleep(450);
+    const editor = getComposer();
+    if (!editor) throw new Error("Discord's message composer was not available.");
 
-    const editor = document.querySelector('[data-slate-editor="true"]') as HTMLElement;
+    // Using ComponentDispatch instead of a synthetic paste keeps working when
+    // Discord changes Slate's clipboard/editor implementation.
+    insertText("/autochannel ban ");
 
-    if (!editor) {
-        log("FAILED: editor not found");
-        return;
-    }
-
-    insertText(editor, "/autochannel ban ");
-
-    await sleep(900);
+    await sleep(700);
 
     await pressEnter(editor);
 
-    await sleep(220);
+    await sleep(300);
 
-    insertText(editor, userId);
+    insertText(userId);
 
-    await sleep(140);
+    await sleep(200);
 
-    await pressEnter(editor);
+    const activeEditor = getComposer();
+    if (!activeEditor) throw new Error("The slash-command argument field did not open.");
+
+    await pressEnter(activeEditor);
 }
 
 async function runAutochannelBan(userId: string, guildId?: string) {
@@ -353,47 +370,45 @@ async function runAutochannelBan(userId: string, guildId?: string) {
     const acChannel = findAcCommandsChannel(targetGuildId);
 
     if (!acChannel) {
-        log("FAILED: no ac-commands channel found");
-        return;
+        throw new Error("No #ac-commands channel was found in this server.");
     }
 
-    goToChannel(targetGuildId, acChannel.id);
+    goToChannel(acChannel.id);
 
-    await sleep(650);
+    const editor = await waitForComposer(acChannel.id);
+    if (!editor) throw new Error("Could not open #ac-commands or its message composer.");
 
     await runSlashCommand(userId);
 }
 
-async function handleVoiceUpdate(event: any) {
+function queueAutochannelBan(userId: string, guildId?: string) {
+    const run = kickQueue.then(() => runAutochannelBan(userId, guildId));
+
+    // Keep the queue usable if a single interaction fails.
+    kickQueue = run.catch(error => {
+        log("FAILED to run /autochannel ban:", error);
+    });
+
+    return run;
+}
+
+async function handleVoiceUpdates({ voiceStates }: { voiceStates?: any[] }) {
     const myUserId = getCurrentUserId();
     if (!myUserId) return;
 
-    const states = [
-        ...(event?.voiceStates || []),
-        ...(event?.voice_states || []),
-        ...(event?.updates || []),
-        ...(event?.states || [])
-    ];
-
-    if (event?.voiceState) states.push(event.voiceState);
-    if (event?.userId || event?.user_id) states.push(event);
-
-    if (!states.length) return;
+    if (!Array.isArray(voiceStates) || !voiceStates.length) return;
+    if (!autoKickEnabled || !autoKickGuildId || !autoKickChannelId) return;
 
     const vault = getVault();
-    if (!vault.length && !autoKickEnabled) return;
+    if (!vault.length) return;
 
-    for (const state of states) {
-        const userId = state?.userId || state?.user_id;
-        const newChannelId = state?.channelId || state?.channel_id || null;
-        const guildId = state?.guildId || state?.guild_id || SelectedGuildStore.getGuildId();
+    for (const state of voiceStates) {
+        const userId = state?.userId;
+        const newChannelId = state?.channelId ?? null;
+        const oldChannelId = state?.oldChannelId ?? null;
+        const guildId = state?.guildId;
 
         if (!userId || !guildId) continue;
-
-        const key = `${guildId}:${userId}`;
-        const oldChannelId = lastKnownVoiceChannel.get(key) ?? null;
-
-        lastKnownVoiceChannel.set(key, newChannelId);
 
         if (userId === myUserId) {
             if (!newChannelId) {
@@ -408,13 +423,14 @@ async function handleVoiceUpdate(event: any) {
         if (!autoKickEnabled || !autoKickChannelId || !autoKickGuildId) continue;
         if (guildId !== autoKickGuildId) continue;
 
-        const joinedVcNow = oldChannelId !== newChannelId && !!newChannelId;
-        if (!joinedVcNow) continue;
-
-        if (newChannelId !== autoKickChannelId) continue;
+        // VOICE_STATE_UPDATES already contains the previous channel. This is
+        // stable across reconnects and avoids treating mute/deafen updates as joins.
+        if (newChannelId !== autoKickChannelId || oldChannelId === autoKickChannelId) continue;
 
         const match = vault.find(e => e.userId === userId && e.guildId === guildId);
         if (!match) continue;
+
+        const key = `${guildId}:${userId}`;
 
         if (recentlyKicked.has(key)) continue;
 
@@ -422,7 +438,9 @@ async function handleVoiceUpdate(event: any) {
 
         log("Auto kick active. Vault user joined armed VC:", userId);
 
-        await runAutochannelBan(userId, guildId);
+        await queueAutochannelBan(userId, guildId).catch(error => {
+            log("Auto kick command failed:", error);
+        });
 
         setTimeout(() => recentlyKicked.delete(key), 15000);
     }
@@ -897,7 +915,10 @@ const userContextPatch: NavContextMenuPatchCallback = (children, props: any) => 
             id="autochannel-kick-user"
             label="Kick Shitter"
             color="danger"
-            action={() => runAutochannelBan(user.id, guildId)}
+            action={() => queueAutochannelBan(user.id, guildId).catch(error => {
+                log("Kick Shitter command failed:", error);
+                showSmallModal("Kick failed", error instanceof Error ? error.message : String(error));
+            })}
         />
     );
 
@@ -941,15 +962,13 @@ export default definePlugin({
     async start() {
         await loadVault();
 
-        FluxDispatcher.subscribe("VOICE_STATE_UPDATES", handleVoiceUpdate);
-        FluxDispatcher.subscribe("VOICE_STATE_UPDATE", handleVoiceUpdate);
+        FluxDispatcher.subscribe("VOICE_STATE_UPDATES", handleVoiceUpdates);
 
         log("Vault listener started.");
     },
 
     stop() {
-        FluxDispatcher.unsubscribe("VOICE_STATE_UPDATES", handleVoiceUpdate);
-        FluxDispatcher.unsubscribe("VOICE_STATE_UPDATE", handleVoiceUpdate);
+        FluxDispatcher.unsubscribe("VOICE_STATE_UPDATES", handleVoiceUpdates);
 
         disableAutoKick("plugin stopped");
 
