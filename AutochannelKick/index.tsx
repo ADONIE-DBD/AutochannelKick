@@ -2,7 +2,7 @@ import { findGroupChildrenByChildId, NavContextMenuPatchCallback } from "@api/Co
 import { DataStore } from "@api/index";
 import definePlugin from "@utils/types";
 import { findByPropsLazy } from "@webpack";
-import { ChannelRouter, ComponentDispatch, FluxDispatcher, Menu, SelectedChannelStore, SelectedGuildStore } from "@webpack/common";
+import { ChannelRouter, FluxDispatcher, Menu, SelectedChannelStore, SelectedGuildStore } from "@webpack/common";
 
 const ChannelStore = findByPropsLazy("getChannel", "getMutableGuildChannelsForGuild");
 const UserStore = findByPropsLazy("getUser", "getCurrentUser");
@@ -286,17 +286,55 @@ function goToChannel(channelId: string) {
     ChannelRouter.transitionToChannel(channelId);
 }
 
-function insertText(text: string) {
-    ComponentDispatch.dispatchToLastSubscribed("INSERT_TEXT", {
-        rawText: text,
-        plainText: text
+function getComposer() {
+    const editors = Array.from(document.querySelectorAll(
+        '[data-slate-editor="true"][contenteditable="true"]'
+    )) as HTMLElement[];
+
+    const visibleEditors = editors.filter(editor => {
+        const rect = editor.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
     });
+
+    // The channel composer is the visible Slate editor nearest the bottom of
+    // the window. This excludes Discord's search/filter controls and popouts.
+    return visibleEditors.sort((a, b) =>
+        b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom
+    )[0] ?? null;
 }
 
-function getComposer() {
-    return document.querySelector(
-        '[data-slate-editor="true"][contenteditable="true"], [role="textbox"][contenteditable="true"]'
-    ) as HTMLElement | null;
+function focusComposer(editor: HTMLElement) {
+    if (document.activeElement instanceof HTMLElement && document.activeElement !== editor) {
+        document.activeElement.blur();
+    }
+
+    editor.focus({ preventScroll: true });
+}
+
+function clearComposer(editor: HTMLElement) {
+    focusComposer(editor);
+
+    const selection = window.getSelection();
+    if (!selection) return;
+
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    document.execCommand("delete");
+    selection.removeAllRanges();
+}
+
+function insertText(editor: HTMLElement, text: string) {
+    focusComposer(editor);
+
+    // execCommand is deprecated for websites, but it intentionally goes
+    // through Chromium's native contenteditable input path. Discord's Slate
+    // editor therefore receives the same beforeinput/input events as typing.
+    if (!document.execCommand("insertText", false, text)) {
+        throw new Error("Discord did not accept text in the message composer.");
+    }
 }
 
 async function waitForComposer(channelId: string, timeoutMs = 5000) {
@@ -315,36 +353,64 @@ async function waitForComposer(channelId: string, timeoutMs = 5000) {
 }
 
 async function pressEnter(editor: HTMLElement) {
-    editor.focus();
+    focusComposer(editor);
 
-    editor.dispatchEvent(new KeyboardEvent("keydown", {
+    const keyDown = new KeyboardEvent("keydown", {
         key: "Enter",
         code: "Enter",
         keyCode: 13,
         which: 13,
         bubbles: true,
-        cancelable: true
-    }));
+        cancelable: true,
+        composed: true
+    });
+
+    // Chromium may ignore legacy keyCode/which constructor values. Discord
+    // still reads them in parts of its command composer.
+    if (keyDown.keyCode !== 13) {
+        try {
+            Object.defineProperties(keyDown, {
+                keyCode: { get: () => 13 },
+                which: { get: () => 13 }
+            });
+        } catch {}
+    }
+
+    editor.dispatchEvent(keyDown);
 
     await sleep(30);
 
-    editor.dispatchEvent(new KeyboardEvent("keyup", {
+    const keyUp = new KeyboardEvent("keyup", {
         key: "Enter",
         code: "Enter",
         keyCode: 13,
         which: 13,
         bubbles: true,
-        cancelable: true
-    }));
+        cancelable: true,
+        composed: true
+    });
+
+    if (keyUp.keyCode !== 13) {
+        try {
+            Object.defineProperties(keyUp, {
+                keyCode: { get: () => 13 },
+                which: { get: () => 13 }
+            });
+        } catch {}
+    }
+
+    editor.dispatchEvent(keyUp);
 }
 
 async function runSlashCommand(userId: string) {
     const editor = getComposer();
     if (!editor) throw new Error("Discord's message composer was not available.");
 
-    // Using ComponentDispatch instead of a synthetic paste keeps working when
-    // Discord changes Slate's clipboard/editor implementation.
-    insertText("/autochannel ban ");
+    // Remove a command left behind by an interrupted/failed earlier run.
+    clearComposer(editor);
+    await sleep(50);
+
+    insertText(editor, "/autochannel ban ");
 
     await sleep(700);
 
@@ -352,7 +418,10 @@ async function runSlashCommand(userId: string) {
 
     await sleep(300);
 
-    insertText(userId);
+    const argumentEditor = getComposer();
+    if (!argumentEditor) throw new Error("The slash-command argument field did not open.");
+
+    insertText(argumentEditor, userId);
 
     // User options open an autocomplete list. Give Discord enough time to
     // resolve the member before accepting the option.
