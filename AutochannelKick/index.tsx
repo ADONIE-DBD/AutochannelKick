@@ -2,7 +2,7 @@ import { findGroupChildrenByChildId, NavContextMenuPatchCallback } from "@api/Co
 import { DataStore } from "@api/index";
 import definePlugin from "@utils/types";
 import { findByPropsLazy } from "@webpack";
-import { ChannelRouter, FluxDispatcher, Menu, SelectedChannelStore, SelectedGuildStore } from "@webpack/common";
+import { ChannelRouter, ComponentDispatch, FluxDispatcher, Menu, SelectedChannelStore, SelectedGuildStore } from "@webpack/common";
 
 const ChannelStore = findByPropsLazy("getChannel", "getMutableGuildChannelsForGuild");
 const UserStore = findByPropsLazy("getUser", "getCurrentUser");
@@ -326,15 +326,43 @@ function clearComposer(editor: HTMLElement) {
     selection.removeAllRanges();
 }
 
-function insertText(editor: HTMLElement, text: string) {
-    focusComposer(editor);
+async function insertText(editor: HTMLElement, text: string) {
+    const expected = text.trim();
 
-    // execCommand is deprecated for websites, but it intentionally goes
-    // through Chromium's native contenteditable input path. Discord's Slate
-    // editor therefore receives the same beforeinput/input events as typing.
-    if (!document.execCommand("insertText", false, text)) {
-        throw new Error("Discord did not accept text in the message composer.");
+    // A search popout can temporarily become Discord's last text subscriber.
+    // Escape closes it; clicking the real Slate editor makes the channel
+    // composer active before the macro inserts anything.
+    for (let attempt = 0; attempt < 3; attempt++) {
+        document.dispatchEvent(new KeyboardEvent("keydown", {
+            key: "Escape",
+            code: "Escape",
+            bubbles: true,
+            cancelable: true,
+            composed: true
+        }));
+
+        focusComposer(editor);
+        editor.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, composed: true }));
+        editor.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, composed: true }));
+        editor.click();
+        focusComposer(editor);
+
+        ComponentDispatch.dispatchToLastSubscribed("INSERT_TEXT", {
+            rawText: text,
+            plainText: text
+        });
+
+        await sleep(120);
+
+        const currentEditor = getComposer();
+        if (currentEditor?.textContent?.includes(expected)) return;
+
+        // If Search stole the first insertion, closing it unregisters that
+        // subscriber and the next short retry lands in the channel composer.
+        editor = currentEditor ?? editor;
     }
+
+    throw new Error("The macro could not type into Discord's channel composer.");
 }
 
 async function waitForComposer(channelId: string, timeoutMs = 5000) {
@@ -410,37 +438,28 @@ async function runSlashCommand(userId: string) {
     clearComposer(editor);
     await sleep(50);
 
-    insertText(editor, "/autochannel ban ");
+    await insertText(editor, "/autochannel ban ");
 
-    await sleep(700);
+    // Long enough for the slash-command result to appear, while still keeping
+    // the macro quick.
+    await sleep(450);
 
     await pressEnter(editor);
 
-    await sleep(300);
+    await sleep(220);
 
     const argumentEditor = getComposer();
     if (!argumentEditor) throw new Error("The slash-command argument field did not open.");
 
-    insertText(argumentEditor, userId);
+    await insertText(argumentEditor, userId);
 
-    // User options open an autocomplete list. Give Discord enough time to
-    // resolve the member before accepting the option.
-    await sleep(500);
+    await sleep(260);
 
     const activeEditor = getComposer();
     if (!activeEditor) throw new Error("The slash-command argument field did not open.");
 
-    // The first Enter accepts the user-option result. A second Enter submits
-    // the completed slash command. If Discord has already submitted it, the
-    // second key press lands in an empty composer and is harmless.
+    // ban_targets is a plain text option, so this single Enter submits it.
     await pressEnter(activeEditor);
-
-    await sleep(300);
-
-    const submitEditor = getComposer();
-    if (!submitEditor) throw new Error("The slash command could not be submitted.");
-
-    await pressEnter(submitEditor);
 }
 
 async function runAutochannelBan(userId: string, guildId?: string) {
