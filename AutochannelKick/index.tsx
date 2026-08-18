@@ -354,18 +354,30 @@ async function runSlashCommand(userId: string) {
 
     insertText(userId);
 
-    await sleep(200);
+    // User options open an autocomplete list. Give Discord enough time to
+    // resolve the member before accepting the option.
+    await sleep(500);
 
     const activeEditor = getComposer();
     if (!activeEditor) throw new Error("The slash-command argument field did not open.");
 
+    // The first Enter accepts the user-option result. A second Enter submits
+    // the completed slash command. If Discord has already submitted it, the
+    // second key press lands in an empty composer and is harmless.
     await pressEnter(activeEditor);
+
+    await sleep(300);
+
+    const submitEditor = getComposer();
+    if (!submitEditor) throw new Error("The slash command could not be submitted.");
+
+    await pressEnter(submitEditor);
 }
 
 async function runAutochannelBan(userId: string, guildId?: string) {
     const targetGuildId = guildId || SelectedGuildStore.getGuildId();
 
-    if (!targetGuildId) return;
+    if (!targetGuildId) throw new Error("No Discord server is currently selected.");
 
     const acChannel = findAcCommandsChannel(targetGuildId);
 
@@ -390,6 +402,29 @@ function queueAutochannelBan(userId: string, guildId?: string) {
     });
 
     return run;
+}
+
+async function kickAndAddToVault(user: any, guildId: string) {
+    const result = await addToVaultById(
+        user.id,
+        guildId,
+        user.globalName || user.username || user.tag || user.id
+    );
+
+    if (result === "invalid") {
+        throw new Error("That user does not have a valid Discord user ID.");
+    }
+
+    try {
+        await queueAutochannelBan(user.id, guildId);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const vaultStatus = result === "added"
+            ? "The user was still added to the vault."
+            : "The user was already in the vault.";
+
+        throw new Error(`${message}\n\n${vaultStatus}`);
+    }
 }
 
 async function handleVoiceUpdates({ voiceStates }: { voiceStates?: any[] }) {
@@ -918,6 +953,18 @@ const userContextPatch: NavContextMenuPatchCallback = (children, props: any) => 
             action={() => queueAutochannelBan(user.id, guildId).catch(error => {
                 log("Kick Shitter command failed:", error);
                 showSmallModal("Kick failed", error instanceof Error ? error.message : String(error));
+            })}
+        />
+    );
+
+    group.push(
+        <Menu.MenuItem
+            id="autochannel-kick-and-vault-user"
+            label="Kick Shitter + Add to Vault"
+            color="danger"
+            action={() => kickAndAddToVault(user, guildId).catch(error => {
+                log("Kick and vault command failed:", error);
+                showSmallModal("Kick and vault failed", error instanceof Error ? error.message : String(error));
             })}
         />
     );
