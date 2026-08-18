@@ -304,47 +304,15 @@ function getComposer() {
 }
 
 function focusComposer(editor: HTMLElement) {
-    if (document.activeElement instanceof HTMLElement && document.activeElement !== editor) {
-        document.activeElement.blur();
-    }
-
     editor.focus({ preventScroll: true });
-}
-
-function clearComposer(editor: HTMLElement) {
-    focusComposer(editor);
-
-    const selection = window.getSelection();
-    if (!selection) return;
-
-    const range = document.createRange();
-    range.selectNodeContents(editor);
-    selection.removeAllRanges();
-    selection.addRange(range);
-
-    document.execCommand("delete");
-    selection.removeAllRanges();
 }
 
 async function insertText(editor: HTMLElement, text: string) {
     const expected = text.trim();
 
-    // A search popout can temporarily become Discord's last text subscriber.
-    // Escape closes it; clicking the real Slate editor makes the channel
-    // composer active before the macro inserts anything.
-    for (let attempt = 0; attempt < 3; attempt++) {
-        document.dispatchEvent(new KeyboardEvent("keydown", {
-            key: "Escape",
-            code: "Escape",
-            bubbles: true,
-            cancelable: true,
-            composed: true
-        }));
-
-        focusComposer(editor);
-        editor.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, composed: true }));
-        editor.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, composed: true }));
-        editor.click();
+    // Never synthesize clicks, selections, or direct DOM edits here. Slate can
+    // become unusable if its internal selection no longer matches the DOM.
+    for (let attempt = 0; attempt < 2; attempt++) {
         focusComposer(editor);
 
         ComponentDispatch.dispatchToLastSubscribed("INSERT_TEXT", {
@@ -352,13 +320,12 @@ async function insertText(editor: HTMLElement, text: string) {
             plainText: text
         });
 
-        await sleep(120);
+        await sleep(180);
 
         const currentEditor = getComposer();
         if (currentEditor?.textContent?.includes(expected)) return;
 
-        // If Search stole the first insertion, closing it unregisters that
-        // subscriber and the next short retry lands in the channel composer.
+        await sleep(200);
         editor = currentEditor ?? editor;
     }
 
@@ -434,10 +401,6 @@ async function runSlashCommand(userId: string) {
     const editor = getComposer();
     if (!editor) throw new Error("Discord's message composer was not available.");
 
-    // Remove a command left behind by an interrupted/failed earlier run.
-    clearComposer(editor);
-    await sleep(50);
-
     await insertText(editor, "/autochannel ban ");
 
     // Long enough for the slash-command result to appear, while still keeping
@@ -460,6 +423,10 @@ async function runSlashCommand(userId: string) {
 
     // ban_targets is a plain text option, so this single Enter submits it.
     await pressEnter(activeEditor);
+
+    // Discord remounts the Slate composer after a slash command is submitted.
+    // Let that finish before the next queued kick begins.
+    await sleep(800);
 }
 
 async function runAutochannelBan(userId: string, guildId?: string) {
@@ -567,6 +534,42 @@ async function handleVoiceUpdates({ voiceStates }: { voiceStates?: any[] }) {
 
         setTimeout(() => recentlyKicked.delete(key), 15000);
     }
+}
+
+function showKickNotice(title: string, message: string) {
+    document.getElementById("autochannel-kick-notice")?.remove();
+
+    const notice = document.createElement("div");
+    notice.id = "autochannel-kick-notice";
+    notice.style.cssText = `
+        position: fixed;
+        right: 20px;
+        bottom: 20px;
+        z-index: 1000000;
+        width: min(380px, calc(100vw - 40px));
+        box-sizing: border-box;
+        background: #313338;
+        border-left: 4px solid #da373c;
+        border-radius: 8px;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+        color: #f2f3f5;
+        padding: 13px 15px;
+        font-family: var(--font-primary), Arial;
+        pointer-events: none;
+    `;
+
+    const heading = document.createElement("div");
+    heading.textContent = title;
+    heading.style.cssText = "font-size:14px;font-weight:800;margin-bottom:4px;";
+
+    const body = document.createElement("div");
+    body.textContent = message;
+    body.style.cssText = "font-size:13px;color:#b5bac1;line-height:1.35;white-space:pre-line;";
+
+    notice.append(heading, body);
+    document.body.appendChild(notice);
+
+    setTimeout(() => notice.remove(), 4500);
 }
 
 function showSmallModal(title: string, message: string) {
@@ -1040,7 +1043,7 @@ const userContextPatch: NavContextMenuPatchCallback = (children, props: any) => 
             color="danger"
             action={() => queueAutochannelBan(user.id, guildId).catch(error => {
                 log("Kick Shitter command failed:", error);
-                showSmallModal("Kick failed", error instanceof Error ? error.message : String(error));
+                showKickNotice("Kick failed", error instanceof Error ? error.message : String(error));
             })}
         />
     );
@@ -1052,7 +1055,7 @@ const userContextPatch: NavContextMenuPatchCallback = (children, props: any) => 
             color="danger"
             action={() => kickAndAddToVault(user, guildId).catch(error => {
                 log("Kick and vault command failed:", error);
-                showSmallModal("Kick and vault failed", error instanceof Error ? error.message : String(error));
+                showKickNotice("Kick and vault failed", error instanceof Error ? error.message : String(error));
             })}
         />
     );
@@ -1106,6 +1109,7 @@ export default definePlugin({
         FluxDispatcher.unsubscribe("VOICE_STATE_UPDATES", handleVoiceUpdates);
 
         disableAutoKick("plugin stopped");
+        document.getElementById("autochannel-kick-notice")?.remove();
 
         log("Vault listener stopped.");
     }
