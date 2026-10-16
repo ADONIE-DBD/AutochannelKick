@@ -273,13 +273,25 @@ async function removeFromVault(userId: string, guildId: string) {
 
 function findAcCommandsChannel(guildId: string) {
     const channels = ChannelStore.getMutableGuildChannelsForGuild(guildId);
+    let renamedMatch: any = null;
+    let topicMatch: any = null;
 
     for (const id in channels) {
         const channel = ChannelStore.getChannel(id);
-        if (channel?.name === "ac-commands") return channel;
+        const name = channel?.name?.toLowerCase();
+
+        // Prefer the original name, but support server prefixes such as the
+        // current #lfg-ac-commands rename without hard-coding one server name.
+        if (name === "ac-commands") return channel;
+        if (!renamedMatch && name?.endsWith("-ac-commands")) renamedMatch = channel;
+
+        // Last-resort detection if the channel is renamed again.
+        if (!topicMatch && channel?.topic?.toLowerCase().includes("/autochannel ban")) {
+            topicMatch = channel;
+        }
     }
 
-    return null;
+    return renamedMatch ?? topicMatch;
 }
 
 function goToChannel(channelId: string) {
@@ -437,13 +449,13 @@ async function runAutochannelBan(userId: string, guildId?: string) {
     const acChannel = findAcCommandsChannel(targetGuildId);
 
     if (!acChannel) {
-        throw new Error("No #ac-commands channel was found in this server.");
+        throw new Error("No Autochannel command channel was found in this server.");
     }
 
     goToChannel(acChannel.id);
 
     const editor = await waitForComposer(acChannel.id);
-    if (!editor) throw new Error("Could not open #ac-commands or its message composer.");
+    if (!editor) throw new Error(`Could not open #${acChannel.name || "Autochannel commands"} or its message composer.`);
 
     await runSlashCommand(userId);
 }
