@@ -1,8 +1,15 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 import { findGroupChildrenByChildId, NavContextMenuPatchCallback } from "@api/ContextMenu";
 import { DataStore } from "@api/index";
+import ErrorBoundary from "@components/ErrorBoundary";
 import definePlugin from "@utils/types";
-import { findByPropsLazy } from "@webpack";
-import { ChannelRouter, ComponentDispatch, FluxDispatcher, Menu, SelectedChannelStore, SelectedGuildStore } from "@webpack/common";
+import { findByPropsLazy, findComponentByCodeLazy } from "@webpack";
+import { ApplicationCommandIndexStore, AuthenticationStore, FluxDispatcher, Menu, RestAPI, SelectedGuildStore, SnowflakeUtils } from "@webpack/common";
 
 const ChannelStore = findByPropsLazy("getChannel", "getMutableGuildChannelsForGuild");
 const UserStore = findByPropsLazy("getUser", "getCurrentUser");
@@ -11,6 +18,8 @@ const CurrentUserStore = findByPropsLazy("getCurrentUser");
 const VoiceStateStore = findByPropsLazy("getVoiceStateForChannel", "getVoiceState");
 const UserProfileActions = findByPropsLazy("fetchProfile");
 const UserProfileStore = findByPropsLazy("getUserProfile");
+const AccountPanelButton = findComponentByCodeLazy(".GREEN,positionKeyStemOverride:");
+const VoiceChannelActions = findByPropsLazy("selectVoiceChannel", "selectChannel");
 
 const VAULT_KEY = "AutochannelKick_ShitterVault_v6";
 
@@ -27,11 +36,22 @@ let autoKickEnabled = false;
 let autoKickGuildId: string | null = null;
 let autoKickChannelId: string | null = null;
 
+type IncrementRun = {
+    guildId: string;
+    channelId: string;
+    remaining: string[];
+    sent: number;
+    total: number;
+    timer?: ReturnType<typeof setTimeout>;
+};
+
+let incrementRun: IncrementRun | null = null;
+let nukeInProgress = false;
+let nukeGeneration = 0;
+
 const recentlyKicked = new Set<string>();
 
-// Discord only has one active composer. Keep command executions in order so two
-// vaulted users joining at once cannot type into, or navigate away from, each
-// other's slash-command form.
+// Serialize interactions so auto kicks and manual batch kicks cannot race.
 let kickQueue: Promise<void> = Promise.resolve();
 
 function sleep(ms: number) {
@@ -294,157 +314,62 @@ function findAcCommandsChannel(guildId: string) {
     return renamedMatch ?? topicMatch;
 }
 
-function goToChannel(channelId: string) {
-    ChannelRouter.transitionToChannel(channelId);
-}
+function findAutochannelBanCommand(channel: any) {
+    const result = ApplicationCommandIndexStore.query(
+        { type: "channel", channel },
+        {
+            commandTypes: [1],
+            text: "autochannel",
+            builtIns: "deny",
+            applicationCommands: true
+        },
+        {
+            allowFetch: true,
+            allowApplicationState: true,
+            allowEmptySections: true,
+            installOnDemand: false,
+            scoreMethod: "none"
+        }
+    );
 
-function getComposer() {
-    const editors = Array.from(document.querySelectorAll(
-        '[data-slate-editor="true"][contenteditable="true"]'
-    )) as HTMLElement[];
+    const command = result.commands.find((entry: any) => {
+        const names = [entry.untranslatedName, entry.displayName]
+            .filter(Boolean)
+            .map((name: string) => name.toLowerCase());
 
-    const visibleEditors = editors.filter(editor => {
-        const rect = editor.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
+        return names.includes("autochannel ban") || (
+            entry.rootCommand?.name?.toLowerCase() === "autochannel" &&
+            entry.subCommandPath?.some((option: any) => option.name?.toLowerCase() === "ban")
+        );
     });
 
-    // The channel composer is the visible Slate editor nearest the bottom of
-    // the window. This excludes Discord's search/filter controls and popouts.
-    return visibleEditors.sort((a, b) =>
-        b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom
-    )[0] ?? null;
+    return { command, loading: result.loading };
 }
 
-function focusComposer(editor: HTMLElement) {
-    editor.focus({ preventScroll: true });
-}
-
-async function insertText(editor: HTMLElement, text: string) {
-    const expected = text.trim();
-
-    // Never synthesize clicks, selections, or direct DOM edits here. Slate can
-    // become unusable if its internal selection no longer matches the DOM.
-    for (let attempt = 0; attempt < 2; attempt++) {
-        focusComposer(editor);
-
-        ComponentDispatch.dispatchToLastSubscribed("INSERT_TEXT", {
-            rawText: text,
-            plainText: text
-        });
-
-        await sleep(180);
-
-        const currentEditor = getComposer();
-        if (currentEditor?.textContent?.includes(expected)) return;
-
-        await sleep(200);
-        editor = currentEditor ?? editor;
-    }
-
-    throw new Error("The macro could not type into Discord's channel composer.");
-}
-
-async function waitForComposer(channelId: string, timeoutMs = 5000) {
+async function waitForAutochannelBanCommand(channel: any, timeoutMs = 6000) {
     const endsAt = Date.now() + timeoutMs;
 
     while (Date.now() < endsAt) {
-        if (SelectedChannelStore.getChannelId() === channelId) {
-            const editor = getComposer();
-            if (editor) return editor;
-        }
-
-        await sleep(50);
+        const { command, loading } = findAutochannelBanCommand(channel);
+        if (command) return command;
+        if (!loading) await sleep(250);
+        else await sleep(100);
     }
 
-    return null;
+    throw new Error("Discord could not load the /autochannel ban command.");
 }
 
-async function pressEnter(editor: HTMLElement) {
-    focusComposer(editor);
-
-    const keyDown = new KeyboardEvent("keydown", {
-        key: "Enter",
-        code: "Enter",
-        keyCode: 13,
-        which: 13,
-        bubbles: true,
-        cancelable: true,
-        composed: true
-    });
-
-    // Chromium may ignore legacy keyCode/which constructor values. Discord
-    // still reads them in parts of its command composer.
-    if (keyDown.keyCode !== 13) {
-        try {
-            Object.defineProperties(keyDown, {
-                keyCode: { get: () => 13 },
-                which: { get: () => 13 }
-            });
-        } catch {}
-    }
-
-    editor.dispatchEvent(keyDown);
-
-    await sleep(30);
-
-    const keyUp = new KeyboardEvent("keyup", {
-        key: "Enter",
-        code: "Enter",
-        keyCode: 13,
-        which: 13,
-        bubbles: true,
-        cancelable: true,
-        composed: true
-    });
-
-    if (keyUp.keyCode !== 13) {
-        try {
-            Object.defineProperties(keyUp, {
-                keyCode: { get: () => 13 },
-                which: { get: () => 13 }
-            });
-        } catch {}
-    }
-
-    editor.dispatchEvent(keyUp);
-}
-
-async function runSlashCommand(userId: string) {
-    const editor = getComposer();
-    if (!editor) throw new Error("Discord's message composer was not available.");
-
-    await insertText(editor, "/autochannel ban ");
-
-    // Long enough for the slash-command result to appear, while still keeping
-    // the macro quick.
-    await sleep(450);
-
-    await pressEnter(editor);
-
-    await sleep(220);
-
-    const argumentEditor = getComposer();
-    if (!argumentEditor) throw new Error("The slash-command argument field did not open.");
-
-    await insertText(argumentEditor, userId);
-
-    await sleep(260);
-
-    const activeEditor = getComposer();
-    if (!activeEditor) throw new Error("The slash-command argument field did not open.");
-
-    // ban_targets is a plain text option, so this single Enter submits it.
-    await pressEnter(activeEditor);
-
-    // Discord remounts the Slate composer after a slash command is submitted.
-    // Let that finish before the next queued kick begins.
-    await sleep(800);
-}
-
-async function runAutochannelBan(userId: string, guildId?: string) {
+async function runAutochannelBanTargets(userIds: string[], guildId?: string, guard?: () => void) {
+    guard?.();
     const targetGuildId = guildId || SelectedGuildStore.getGuildId();
 
     if (!targetGuildId) throw new Error("No Discord server is currently selected.");
+
+    const targets = [...new Set(userIds)]
+        .filter(id => /^\d{17,20}$/.test(id))
+        .slice(0, 10);
+
+    if (!targets.length) throw new Error("No valid users were selected to kick.");
 
     const acChannel = findAcCommandsChannel(targetGuildId);
 
@@ -452,23 +377,219 @@ async function runAutochannelBan(userId: string, guildId?: string) {
         throw new Error("No Autochannel command channel was found in this server.");
     }
 
-    goToChannel(acChannel.id);
+    const command = await waitForAutochannelBanCommand(acChannel);
+    const { rootCommand } = command;
+    if (!rootCommand) throw new Error("Discord returned incomplete Autochannel command data.");
 
-    const editor = await waitForComposer(acChannel.id);
-    if (!editor) throw new Error(`Could not open #${acChannel.name || "Autochannel commands"} or its message composer.`);
+    const subCommand = command.subCommandPath?.find((option: any) =>
+        option.name?.toLowerCase() === "ban"
+    );
+    const targetOption = command.options?.find((option: any) =>
+        option.name?.toLowerCase() === "ban_targets"
+    );
 
-    await runSlashCommand(userId);
+    guard?.();
+    await RestAPI.post({
+        url: "/interactions",
+        body: {
+            type: 2,
+            application_id: rootCommand.application_id || command.applicationId,
+            guild_id: targetGuildId,
+            channel_id: acChannel.id,
+            session_id: AuthenticationStore.getSessionId(),
+            nonce: String(SnowflakeUtils.fromTimestamp(Date.now())),
+            analytics_location: "slash_ui",
+            data: {
+                version: rootCommand.version || command.version,
+                id: rootCommand.id,
+                name: rootCommand.name,
+                type: rootCommand.type || 1,
+                options: [{
+                    type: subCommand?.type || 1,
+                    name: subCommand?.name || "ban",
+                    options: [{
+                        type: targetOption?.type || 3,
+                        name: targetOption?.name || "ban_targets",
+                        value: targets.join(" ")
+                    }]
+                }],
+                application_command: rootCommand,
+                attachments: []
+            }
+        }
+    });
+
+    log(`Background kick sent for ${targets.length} user(s) through #${acChannel.name}.`);
 }
 
-function queueAutochannelBan(userId: string, guildId?: string) {
-    const run = kickQueue.then(() => runAutochannelBan(userId, guildId));
+function queueAutochannelBanTargets(userIds: string[], guildId?: string, guard?: () => void) {
+    const run = kickQueue.then(() => runAutochannelBanTargets(userIds, guildId, guard));
 
-    // Keep the queue usable if a single interaction fails.
     kickQueue = run.catch(error => {
         log("FAILED to run /autochannel ban:", error);
     });
 
     return run;
+}
+
+function queueAutochannelBan(userId: string, guildId?: string) {
+    return queueAutochannelBanTargets([userId], guildId);
+}
+
+async function kickUpToTenVaultedUsers(guildId: string) {
+    const channelId = getMyVoiceChannelId(guildId);
+    if (!channelId) throw new Error("Join the voice channel you own first.");
+
+    const voiceStates = VoiceStateStore.getVoiceStatesForChannel(channelId) || {};
+    const myUserId = getCurrentUserId();
+    const targets = getVault()
+        .filter(entry => entry.guildId === guildId && entry.userId !== myUserId && voiceStates[entry.userId])
+        .map(entry => entry.userId)
+        .slice(0, 10);
+
+    if (!targets.length) {
+        throw new Error("No vaulted users are currently in your voice channel.");
+    }
+
+    await queueAutochannelBanTargets(targets, guildId);
+    showKickNotice("Batch kick sent", `Sent ${targets.length} vaulted user${targets.length === 1 ? "" : "s"} in the background.`, "#23a559");
+}
+
+function getVoiceMemberIds(channelId: string): string[] {
+    return [...new Set<string>(Object.values(VoiceStateStore.getVoiceStatesForChannel(channelId) || {})
+        .map((state: any) => state.userId ?? state.user_id)
+        .filter((id: any) => typeof id === "string" && /^\d{17,20}$/.test(id)))];
+}
+
+function updateVaultActionButtons() {
+    const button = document.getElementById("autochannel-increment-button");
+    if (button) {
+        const active = incrementRun?.guildId === button.dataset.guildId;
+        button.textContent = active ? "Increment kicking: On (Stop)" : "Increment kicking: Off";
+        button.setAttribute("aria-pressed", String(active));
+    }
+    const status = document.getElementById("autochannel-increment-status");
+    if (status) {
+        status.textContent = incrementRun && incrementRun.guildId === status.dataset.guildId
+            ? `${incrementRun.sent}/${incrementRun.total} IDs submitted. Up to 10 every 15 seconds.`
+            : "Increment kicking processes the entire server vault, including users outside your VC.";
+    }
+    const nukeButton = document.getElementById("autochannel-nuke-button") as HTMLButtonElement | null;
+    if (nukeButton) {
+        nukeButton.disabled = nukeInProgress;
+        nukeButton.textContent = nukeInProgress ? "Nuking VC…" : "Nuke VC";
+    }
+}
+
+function stopIncrementKicking() {
+    if (incrementRun?.timer) clearTimeout(incrementRun.timer);
+    incrementRun = null;
+    updateVaultActionButtons();
+}
+
+function toggleIncrementKicking(guildId: string) {
+    if (incrementRun?.guildId === guildId) {
+        stopIncrementKicking();
+        showKickNotice("Increment kicking stopped", "No further batches will be sent.", "#5865f2");
+        return;
+    }
+    if (nukeInProgress) throw new Error("Wait for Nuke VC to finish first.");
+    const channelId = getMyVoiceChannelId(guildId);
+    if (!channelId) throw new Error("Join the voice channel you own first.");
+
+    const remaining = [...new Set(getVault()
+        .filter(entry => entry.guildId === guildId && entry.userId !== getCurrentUserId())
+        .map(entry => entry.userId))].filter(id => /^\d{17,20}$/.test(id));
+    if (!remaining.length) throw new Error("This server's vault has no users to ban.");
+
+    stopIncrementKicking();
+    const run: IncrementRun = { guildId, channelId, remaining, sent: 0, total: remaining.length };
+    incrementRun = run;
+    updateVaultActionButtons();
+    void sendIncrementBatch(run);
+}
+
+async function sendIncrementBatch(run: IncrementRun) {
+    const guard = () => {
+        if (incrementRun !== run) throw new Error("Increment kicking was stopped.");
+        if (getMyVoiceChannelId(run.guildId) !== run.channelId) {
+            throw new Error("You left or changed voice channels.");
+        }
+    };
+    try {
+        guard();
+        // Respect removals from the vault while a run is active.
+        run.remaining = run.remaining.filter(id => isInVault(id, run.guildId));
+        const batch = run.remaining.slice(0, 10);
+        if (batch.length) {
+            await queueAutochannelBanTargets(batch, run.guildId, guard);
+            if (incrementRun !== run) return;
+            run.remaining.splice(0, batch.length);
+            run.sent += batch.length;
+        }
+        updateVaultActionButtons();
+        if (!run.remaining.length) {
+            stopIncrementKicking();
+            showKickNotice("Increment kicking finished", `Submitted bans for ${run.sent} vault users. Check the bot's replies for results.`, "#23a559");
+            return;
+        }
+        run.timer = setTimeout(() => void sendIncrementBatch(run), 15000);
+    } catch (error) {
+        if (incrementRun !== run) return;
+        stopIncrementKicking();
+        log("Increment kicking failed:", error);
+        showKickNotice("Increment kicking stopped", error instanceof Error ? error.message : String(error));
+    }
+}
+
+async function nukeVc(guildId: string) {
+    if (nukeInProgress) throw new Error("Nuke VC is already running.");
+    const channelId = getMyVoiceChannelId(guildId);
+    if (!channelId) throw new Error("Join the voice channel you own first.");
+    const targets = getVoiceMemberIds(channelId).filter(id => id !== getCurrentUserId());
+    stopIncrementKicking();
+    disableAutoKick("Nuke VC started");
+    nukeInProgress = true;
+    const generation = ++nukeGeneration;
+    updateVaultActionButtons();
+    const guard = () => {
+        if (!nukeInProgress || generation !== nukeGeneration || getMyVoiceChannelId(guildId) !== channelId) {
+            throw new Error("Nuke VC stopped because you left or changed voice channels.");
+        }
+    };
+    try {
+        for (let offset = 0; offset < targets.length; offset += 10) {
+            guard();
+            const batch = targets.slice(offset, offset + 10);
+            await queueAutochannelBanTargets(batch, guildId, guard);
+            // The command response only confirms receipt. Keep ownership until
+            // voice-state updates show the bot actually removed the targets.
+            const deadline = Date.now() + 15000;
+            while (batch.some(id => getVoiceMemberIds(channelId).includes(id))) {
+                guard();
+                if (Date.now() >= deadline) {
+                    throw new Error("Some users are still in the VC. You remain connected; check the bot's reply before trying again.");
+                }
+                await sleep(250);
+            }
+            if (offset + 10 < targets.length) await sleep(15000);
+        }
+        guard();
+        await VoiceChannelActions.selectVoiceChannel(null);
+        showKickNotice("Nuke VC finished", `Removed ${targets.length} users and disconnected you.`, "#23a559");
+    } finally {
+        if (generation === nukeGeneration) {
+            nukeInProgress = false;
+            updateVaultActionButtons();
+        }
+    }
+}
+
+function reportActionError(title: string, action: () => void | Promise<void>) {
+    Promise.resolve().then(action).catch(error => {
+        log(title, error);
+        showKickNotice(title, error instanceof Error ? error.message : String(error));
+    });
 }
 
 async function kickAndAddToVault(user: any, guildId: string) {
@@ -499,6 +620,11 @@ async function handleVoiceUpdates({ voiceStates }: { voiceStates?: any[] }) {
     if (!myUserId) return;
 
     if (!Array.isArray(voiceStates) || !voiceStates.length) return;
+    if (incrementRun && voiceStates.some(state => state.userId === myUserId &&
+        (state.channelId ?? null) !== incrementRun!.channelId)) {
+        stopIncrementKicking();
+        showKickNotice("Increment kicking stopped", "You left or changed voice channels.");
+    }
     if (!autoKickEnabled || !autoKickGuildId || !autoKickChannelId) return;
 
     const vault = getVault();
@@ -548,7 +674,7 @@ async function handleVoiceUpdates({ voiceStates }: { voiceStates?: any[] }) {
     }
 }
 
-function showKickNotice(title: string, message: string) {
+function showKickNotice(title: string, message: string, borderColor = "#da373c") {
     document.getElementById("autochannel-kick-notice")?.remove();
 
     const notice = document.createElement("div");
@@ -561,7 +687,7 @@ function showKickNotice(title: string, message: string) {
         width: min(380px, calc(100vw - 40px));
         box-sizing: border-box;
         background: #313338;
-        border-left: 4px solid #da373c;
+        border-left: 4px solid ${borderColor};
         border-radius: 8px;
         box-shadow: 0 10px 30px rgba(0,0,0,0.45);
         color: #f2f3f5;
@@ -655,7 +781,7 @@ function showImportModal(guildId: string, onDone: () => void) {
     `;
 
     const header = document.createElement("div");
-    header.style.cssText = `padding: 20px 22px 10px 22px;`;
+    header.style.cssText = "padding: 20px 22px 10px 22px;";
     header.innerHTML = `
         <div style="font-size:20px;font-weight:800;">Import IDs</div>
         <div style="font-size:12px;color:#b5bac1;margin-top:4px;">
@@ -664,7 +790,7 @@ function showImportModal(guildId: string, onDone: () => void) {
     `;
 
     const body = document.createElement("div");
-    body.style.cssText = `padding: 0 22px 20px 22px;`;
+    body.style.cssText = "padding: 0 22px 20px 22px;";
 
     const textarea = document.createElement("textarea");
     textarea.placeholder = "123456789012345678\n234567890123456789\n345678901234567890";
@@ -821,7 +947,7 @@ function showVaultModal(guildId: string) {
     const addRow = document.createElement("div");
     addRow.style.cssText = `
         display: grid;
-        grid-template-columns: 1fr auto auto auto;
+        grid-template-columns: minmax(0, 1fr) auto auto auto;
         gap: 8px;
     `;
 
@@ -832,6 +958,7 @@ function showVaultModal(guildId: string) {
     const addButton = makeButton("Add ID", "#5865f2");
     const importButton = makeButton("Import IDs", "#4f545c");
     const exportButton = makeButton("Export IDs", "#4f545c");
+    const batchKickButton = makeButton("Kick Up to 10 in VC (Once)", "#da373c");
 
     addRow.appendChild(addInput);
     addRow.appendChild(addButton);
@@ -840,6 +967,22 @@ function showVaultModal(guildId: string) {
 
     controls.appendChild(search);
     controls.appendChild(addRow);
+
+    const actionRow = document.createElement("div");
+    actionRow.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;";
+    const incrementButton = makeButton("Increment kicking: Off", "#5865f2");
+    incrementButton.id = "autochannel-increment-button";
+    incrementButton.dataset.guildId = guildId;
+    incrementButton.onclick = () => reportActionError("Increment kicking failed", () => toggleIncrementKicking(guildId));
+    const nukeButton = makeButton("Nuke VC", "#da373c");
+    nukeButton.id = "autochannel-nuke-button";
+    nukeButton.onclick = () => reportActionError("Nuke VC failed", () => nukeVc(guildId));
+    actionRow.append(incrementButton, batchKickButton, nukeButton);
+    const incrementStatus = document.createElement("div");
+    incrementStatus.id = "autochannel-increment-status";
+    incrementStatus.dataset.guildId = guildId;
+    incrementStatus.style.cssText = "font-size:12px;color:#b5bac1;";
+    controls.append(actionRow, incrementStatus);
 
     const body = document.createElement("div");
     body.className = "ak-vault-scroll";
@@ -907,7 +1050,7 @@ function showVaultModal(guildId: string) {
             `;
 
             const text = document.createElement("div");
-            text.style.cssText = `min-width: 0;`;
+            text.style.cssText = "min-width: 0;";
 
             const name = getCachedUserName(entry.userId, entry.username);
 
@@ -950,6 +1093,13 @@ function showVaultModal(guildId: string) {
     }
 
     search.addEventListener("input", () => renderList(search.value));
+
+    batchKickButton.onclick = () => {
+        kickUpToTenVaultedUsers(guildId).catch(error => {
+            log("Batch kick failed:", error);
+            showKickNotice("Batch kick failed", error instanceof Error ? error.message : String(error));
+        });
+    };
 
     addButton.onclick = async () => {
         const result = await addToVaultById(addInput.value, guildId);
@@ -994,6 +1144,7 @@ function showVaultModal(guildId: string) {
     });
 
     document.body.appendChild(backdrop);
+    updateVaultActionButtons();
     search.focus();
 
     renderList();
@@ -1036,6 +1187,37 @@ function escapeHtml(value: string) {
         .replaceAll(">", "&gt;")
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#039;");
+}
+
+function VaultIcon() {
+    return (
+        <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+            <path
+                fill="currentColor"
+                d="M4 3h16a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm1 3v12h14V6H5Zm7 1.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9Zm0 2a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Zm-.75.75h1.5v1h1v1.5h-1v1h-1.5v-1h-1v-1.5h1v-1ZM6 7h1.5v4H6V7Zm0 6h1.5v4H6v-4Z"
+            />
+        </svg>
+    );
+}
+
+function VaultPanelButton(props: { nameplate?: any; }) {
+    return (
+        <AccountPanelButton
+            tooltipText="Open Shitter Vault"
+            icon={VaultIcon}
+            plated={props?.nameplate != null}
+            onClick={() => {
+                const guildId = SelectedGuildStore.getGuildId();
+
+                if (!guildId) {
+                    showKickNotice("Open a server first", "The vault is stored separately for each server.");
+                    return;
+                }
+
+                showVaultModal(guildId);
+            }}
+        />
+    );
 }
 
 const userContextPatch: NavContextMenuPatchCallback = (children, props: any) => {
@@ -1082,6 +1264,31 @@ const userContextPatch: NavContextMenuPatchCallback = (children, props: any) => 
             />
 
             <Menu.MenuItem
+                id="shitter-vault-kick-ten"
+                label="Kick Up to 10 in VC (Once)"
+                color="danger"
+                action={() => kickUpToTenVaultedUsers(guildId).catch(error => {
+                    log("Batch kick failed:", error);
+                    showKickNotice("Batch kick failed", error instanceof Error ? error.message : String(error));
+                })}
+            />
+
+            <Menu.MenuCheckboxItem
+                id="shitter-vault-increment-kicking"
+                label="Increment kicking"
+                checked={incrementRun?.guildId === guildId}
+                action={() => reportActionError("Increment kicking failed", () => toggleIncrementKicking(guildId))}
+            />
+
+            <Menu.MenuItem
+                id="shitter-vault-nuke-vc"
+                label="Nuke VC"
+                color="danger"
+                disabled={nukeInProgress}
+                action={() => reportActionError("Nuke VC failed", () => nukeVc(guildId))}
+            />
+
+            <Menu.MenuItem
                 id="shitter-vault-add"
                 label={inVault ? "Remove from Shitter Vault" : "Add to Shitter Vault"}
                 color={inVault ? "default" : "danger"}
@@ -1105,9 +1312,19 @@ export default definePlugin({
     description: "Adds Kick Shitter and Shitter Vault.",
     authors: [{ name: "ADONIE", id: 123456789012345678n }],
 
+    patches: [{
+        find: "#{intl::USER_PROFILE_ACCOUNT_POPOUT_BUTTON_A11Y_LABEL}",
+        replacement: {
+            match: /children:\[(?=.{0,400}?accountContainerRef)/,
+            replace: "children:[$self.VaultPanelButton(arguments[0]),"
+        }
+    }],
+
     contextMenus: {
         "user-context": userContextPatch
     },
+
+    VaultPanelButton: ErrorBoundary.wrap(VaultPanelButton, { noop: true }),
 
     async start() {
         await loadVault();
@@ -1121,6 +1338,10 @@ export default definePlugin({
         FluxDispatcher.unsubscribe("VOICE_STATE_UPDATES", handleVoiceUpdates);
 
         disableAutoKick("plugin stopped");
+        stopIncrementKicking();
+        nukeInProgress = false;
+        nukeGeneration++;
+        document.getElementById("autochannel-vault-modal")?.remove();
         document.getElementById("autochannel-kick-notice")?.remove();
 
         log("Vault listener stopped.");
