@@ -1,125 +1,128 @@
-```powershell
-$ErrorActionPreference = "Stop"
+param(
+    [string]$VencordPath = 'C:\Vencord',
+    [switch]$NoPause
+)
 
-Write-Host ""
-Write-Host "=== AutochannelKick Installer ==="
-Write-Host ""
+$ErrorActionPreference = 'Stop'
 
-# ----------------------------
-# REQUIRED PROGRAM CHECKS
-# ----------------------------
-
-if (!(Get-Command git -ErrorAction SilentlyContinue)) {
-    Write-Host ""
-    Write-Host "Git is not installed."
-    Write-Host "Install it here:"
-    Write-Host "https://git-scm.com/download/win"
-    pause
-    exit
+function Invoke-Checked {
+    param([string]$Program, [string[]]$Arguments)
+    & $Program @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Program failed with exit code $LASTEXITCODE. Installation stopped."
+    }
 }
 
-if (!(Get-Command node -ErrorAction SilentlyContinue)) {
-    Write-Host ""
-    Write-Host "Node.js is not installed."
-    Write-Host "Install Node.js LTS here:"
-    Write-Host "https://nodejs.org"
-    pause
-    exit
+function Find-Program {
+    param([string[]]$Names)
+    foreach ($name in $Names) {
+        $command = Get-Command $name -ErrorAction SilentlyContinue
+        if ($command) { return $command.Source }
+    }
+    return $null
 }
 
-# ----------------------------
-# ENABLE SCRIPT EXECUTION
-# ----------------------------
+$originalLocation = Get-Location
+$downloadDirectory = $null
 
 try {
-    Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force
-} catch {}
+    Write-Host "`n=== AutochannelKick Installer ===`n"
+    $gitProgram = Find-Program -Names @('git.exe', 'git')
+    $nodeProgram = Find-Program -Names @('node.exe', 'node')
+    if (!$gitProgram) { throw 'Install Git first: https://git-scm.com/download/win' }
+    if (!$nodeProgram) { throw 'Install Node.js LTS first: https://nodejs.org' }
 
-# ----------------------------
-# INSTALL PNPM
-# ----------------------------
+    $nodeMajor = [int](& $nodeProgram -p 'process.versions.node.split(".")[0]')
+    if ($nodeMajor -lt 22) { throw 'Vencord requires Node.js 22 or newer. Install Node.js LTS.' }
 
-if (!(Get-Command pnpm -ErrorAction SilentlyContinue)) {
-    Write-Host ""
-    Write-Host "Installing pnpm..."
-    npm install -g pnpm
+    $VencordPath = [IO.Path]::GetFullPath($VencordPath)
+    if (!(Test-Path -LiteralPath $VencordPath)) {
+        Write-Host 'Downloading the newest Vencord source...'
+        Invoke-Checked -Program $gitProgram -Arguments @('clone', '--branch', 'main', 'https://github.com/Vendicated/Vencord.git', $VencordPath)
+    } else {
+        if (!(Test-Path -LiteralPath (Join-Path $VencordPath '.git'))) {
+            throw "$VencordPath exists but is not a Vencord Git checkout. Nothing was overwritten."
+        }
+        $branch = & $gitProgram -C $VencordPath branch --show-current
+        if ($LASTEXITCODE -ne 0 -or $branch -ne 'main') {
+            throw 'The existing Vencord checkout must be on main before this installer can update it.'
+        }
+        $trackedChanges = & $gitProgram -C $VencordPath status --porcelain --untracked-files=no
+        if ($LASTEXITCODE -ne 0 -or $trackedChanges) {
+            throw 'The Vencord checkout has tracked edits. Save those edits before updating; they were preserved.'
+        }
+        Write-Host 'Updating Vencord to the newest main...'
+        Invoke-Checked -Program $gitProgram -Arguments @('-C', $VencordPath, 'pull', '--ff-only', 'origin', 'main')
+    }
+
+    # Use the plugin included beside this script when available. This allows
+    # the downloaded update package to install its exact plugin version.
+    $pluginSource = $null
+    if ($PSScriptRoot) {
+        $bundledPlugin = Join-Path $PSScriptRoot 'AutochannelKick'
+        if (Test-Path -LiteralPath (Join-Path $bundledPlugin 'index.tsx')) {
+            $pluginSource = $bundledPlugin
+        }
+    }
+    if (!$pluginSource) {
+        $downloadDirectory = Join-Path ([IO.Path]::GetTempPath()) ('AutochannelKick-' + [guid]::NewGuid().ToString('N'))
+        Write-Host 'Downloading AutochannelKick...'
+        Invoke-Checked -Program $gitProgram -Arguments @('clone', '--depth', '1', 'https://github.com/ADONIE-DBD/AutochannelKick.git', $downloadDirectory)
+        $pluginSource = Join-Path $downloadDirectory 'AutochannelKick'
+    }
+    if (!(Test-Path -LiteralPath (Join-Path $pluginSource 'index.tsx'))) {
+        throw 'The plugin download does not contain AutochannelKick/index.tsx.'
+    }
+
+    $pluginPath = Join-Path $VencordPath 'src\userplugins\AutochannelKick'
+    if (Test-Path -LiteralPath $pluginPath) {
+        $backupRoot = Join-Path $VencordPath 'autochannel-backups'
+        New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+        $backupPath = Join-Path $backupRoot ((Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N'))
+        Copy-Item -LiteralPath $pluginPath -Destination $backupPath -Recurse
+        Write-Host "Previous plugin backed up to $backupPath"
+    }
+    New-Item -ItemType Directory -Path $pluginPath -Force | Out-Null
+    Get-ChildItem -LiteralPath $pluginSource -Force | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $pluginPath -Recurse -Force
+    }
+
+    $package = Get-Content -LiteralPath (Join-Path $VencordPath 'package.json') -Raw | ConvertFrom-Json
+    $packageManager = [string]$package.packageManager
+    if ($packageManager -notmatch '^pnpm@(\d+\.\d+\.\d+)') { throw 'Vencord does not specify a supported pnpm version.' }
+    $requiredPnpmVersion = $Matches[1]
+    $pnpmProgram = Find-Program -Names @('pnpm.cmd', 'pnpm.exe', 'pnpm')
+    $installedPnpmVersion = if ($pnpmProgram) { & $pnpmProgram --version } else { '' }
+    if (!$pnpmProgram -or $installedPnpmVersion -ne $requiredPnpmVersion) {
+        $npmProgram = Find-Program -Names @('npm.cmd', 'npm.exe', 'npm')
+        if (!$npmProgram) { throw 'npm was not found. Repair the Node.js installation.' }
+        Write-Host "Installing the pnpm version required by Vencord ($requiredPnpmVersion)..."
+        Invoke-Checked -Program $npmProgram -Arguments @('install', '-g', "pnpm@$requiredPnpmVersion")
+        $pnpmProgram = Find-Program -Names @('pnpm.cmd', 'pnpm.exe', 'pnpm')
+        if (!$pnpmProgram) { throw 'pnpm was installed but is not on PATH. Open a new PowerShell window and retry.' }
+    }
+
+    Set-Location -LiteralPath $VencordPath
+    Write-Host 'Installing dependencies...'
+    Invoke-Checked -Program $pnpmProgram -Arguments @('install', '--frozen-lockfile')
+    Write-Host 'Building Vencord...'
+    Invoke-Checked -Program $pnpmProgram -Arguments @('build')
+    Write-Host 'Injecting Discord...'
+    Invoke-Checked -Program $pnpmProgram -Arguments @('inject')
+
+    Write-Host "`nINSTALL COMPLETE`nRestart Discord completely."
+    Write-Host 'Enable Settings -> Vencord -> Plugins -> AutochannelKick.'
+    if (!$NoPause) { [void](Read-Host 'Press Enter to continue') }
+} finally {
+    Set-Location -LiteralPath $originalLocation.Path
+    if ($downloadDirectory) {
+        # Delete only the unique download directory created by this run.
+        $resolvedDownload = [IO.Path]::GetFullPath($downloadDirectory)
+        $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+        if ($resolvedDownload.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -and
+            [IO.Path]::GetFileName($resolvedDownload) -match '^AutochannelKick-[a-f0-9]{32}$' -and
+            (Test-Path -LiteralPath $resolvedDownload)) {
+            Remove-Item -LiteralPath $resolvedDownload -Recurse -Force
+        }
+    }
 }
-
-# ----------------------------
-# PATHS
-# ----------------------------
-
-$VencordPath = "C:\Vencord"
-$TempPath = Join-Path $env:TEMP "AutochannelKick"
-$PluginPath = Join-Path $VencordPath "src\userplugins\AutochannelKick"
-
-# ----------------------------
-# CLEAN TEMP
-# ----------------------------
-
-if (Test-Path $TempPath) {
-    Remove-Item $TempPath -Recurse -Force
-}
-
-# ----------------------------
-# DOWNLOAD VENCORD
-# ----------------------------
-
-if (!(Test-Path $VencordPath)) {
-    Write-Host ""
-    Write-Host "Downloading Vencord..."
-    git clone https://github.com/Vendicated/Vencord.git $VencordPath
-}
-
-# ----------------------------
-# DOWNLOAD PLUGIN
-# ----------------------------
-
-Write-Host ""
-Write-Host "Downloading AutochannelKick..."
-
-git clone https://github.com/ADONIE-DBD/AutochannelKick.git $TempPath
-
-# ----------------------------
-# INSTALL PLUGIN
-# ----------------------------
-
-if (Test-Path $PluginPath) {
-    Remove-Item $PluginPath -Recurse -Force
-}
-
-New-Item -ItemType Directory -Force -Path $PluginPath | Out-Null
-
-Copy-Item "$TempPath\AutochannelKick\*" $PluginPath -Recurse -Force
-
-# ----------------------------
-# BUILD VENCORD
-# ----------------------------
-
-Set-Location $VencordPath
-
-Write-Host ""
-Write-Host "Installing dependencies..."
-pnpm install
-
-Write-Host ""
-Write-Host "Building Vencord..."
-pnpm build
-
-Write-Host ""
-Write-Host "Injecting Discord..."
-pnpm inject
-
-Write-Host ""
-Write-Host "================================="
-Write-Host "INSTALL COMPLETE"
-Write-Host "================================="
-Write-Host ""
-Write-Host "Restart Discord."
-Write-Host ""
-Write-Host "Enable:"
-Write-Host "Settings -> Vencord -> Plugins -> AutochannelKick"
-Write-Host ""
-
-pause
-```
