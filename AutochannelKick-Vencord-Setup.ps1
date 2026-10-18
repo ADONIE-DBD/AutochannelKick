@@ -22,6 +22,20 @@ function Find-Program {
     return $null
 }
 
+function Get-NodeMajorVersion {
+    param([string]$Program)
+    # --version avoids JavaScript string quoting across PowerShell versions.
+    $versionOutput = & $Program --version
+    if ($LASTEXITCODE -ne 0) {
+        throw "Node.js version detection failed with exit code $LASTEXITCODE."
+    }
+    $versionText = ($versionOutput | Out-String).Trim()
+    if ($versionText -notmatch '^v(?<Major>\d+)\.\d+\.\d+(?:[-+].*)?$') {
+        throw "Could not read the Node.js version: $versionText"
+    }
+    return [int]$Matches['Major']
+}
+
 $originalLocation = Get-Location
 $downloadDirectory = $null
 
@@ -32,7 +46,7 @@ try {
     if (!$gitProgram) { throw 'Install Git first: https://git-scm.com/download/win' }
     if (!$nodeProgram) { throw 'Install Node.js LTS first: https://nodejs.org' }
 
-    $nodeMajor = [int](& $nodeProgram -p 'process.versions.node.split(".")[0]')
+    $nodeMajor = Get-NodeMajorVersion -Program $nodeProgram
     if ($nodeMajor -lt 22) { throw 'Vencord requires Node.js 22 or newer. Install Node.js LTS.' }
 
     $VencordPath = [IO.Path]::GetFullPath($VencordPath)
