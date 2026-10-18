@@ -9,7 +9,7 @@ import { DataStore } from "@api/index";
 import ErrorBoundary from "@components/ErrorBoundary";
 import definePlugin from "@utils/types";
 import { findByPropsLazy, findComponentByCodeLazy } from "@webpack";
-import { ApplicationCommandIndexStore, AuthenticationStore, FluxDispatcher, Menu, RestAPI, SelectedGuildStore, SnowflakeUtils } from "@webpack/common";
+import { ApplicationCommandIndexStore, AuthenticationStore, FluxDispatcher, MediaEngineStore, Menu, RestAPI, SelectedGuildStore, SnowflakeUtils } from "@webpack/common";
 
 const ChannelStore = findByPropsLazy("getChannel", "getMutableGuildChannelsForGuild");
 const UserStore = findByPropsLazy("getUser", "getCurrentUser");
@@ -20,6 +20,7 @@ const UserProfileActions = findByPropsLazy("fetchProfile");
 const UserProfileStore = findByPropsLazy("getUserProfile");
 const AccountPanelButton = findComponentByCodeLazy(".GREEN,positionKeyStemOverride:");
 const VoiceChannelActions = findByPropsLazy("selectVoiceChannel", "selectChannel");
+const AudioActions = findByPropsLazy("toggleLocalMute", "setLocalVolume");
 
 const VAULT_KEY = "AutochannelKick_ShitterVault_v6";
 
@@ -436,55 +437,15 @@ function queueAutochannelBan(userId: string, guildId?: string) {
     return queueAutochannelBanTargets([userId], guildId);
 }
 
-async function kickUpToTenVaultedUsers(guildId: string) {
-    const channelId = getMyVoiceChannelId(guildId);
-    if (!channelId) throw new Error("Join the voice channel you own first.");
-
-    const voiceStates = VoiceStateStore.getVoiceStatesForChannel(channelId) || {};
-    const myUserId = getCurrentUserId();
-    const targets = getVault()
-        .filter(entry => entry.guildId === guildId && entry.userId !== myUserId && voiceStates[entry.userId])
-        .map(entry => entry.userId)
-        .slice(0, 10);
-
-    if (!targets.length) {
-        throw new Error("No vaulted users are currently in your voice channel.");
-    }
-
-    await queueAutochannelBanTargets(targets, guildId);
-    showKickNotice("Batch kick sent", `Sent ${targets.length} vaulted user${targets.length === 1 ? "" : "s"} in the background.`, "#23a559");
-}
-
 function getVoiceMemberIds(channelId: string): string[] {
     return [...new Set<string>(Object.values(VoiceStateStore.getVoiceStatesForChannel(channelId) || {})
         .map((state: any) => state.userId ?? state.user_id)
         .filter((id: any) => typeof id === "string" && /^\d{17,20}$/.test(id)))];
 }
 
-function updateVaultActionButtons() {
-    const button = document.getElementById("autochannel-increment-button");
-    if (button) {
-        const active = incrementRun?.guildId === button.dataset.guildId;
-        button.textContent = active ? "Increment kicking: On (Stop)" : "Increment kicking: Off";
-        button.setAttribute("aria-pressed", String(active));
-    }
-    const status = document.getElementById("autochannel-increment-status");
-    if (status) {
-        status.textContent = incrementRun && incrementRun.guildId === status.dataset.guildId
-            ? `${incrementRun.sent}/${incrementRun.total} IDs submitted. Up to 10 every 15 seconds.`
-            : "Increment kicking processes the entire server vault, including users outside your VC.";
-    }
-    const nukeButton = document.getElementById("autochannel-nuke-button") as HTMLButtonElement | null;
-    if (nukeButton) {
-        nukeButton.disabled = nukeInProgress;
-        nukeButton.textContent = nukeInProgress ? "Nuking VC…" : "Nuke VC";
-    }
-}
-
 function stopIncrementKicking() {
     if (incrementRun?.timer) clearTimeout(incrementRun.timer);
     incrementRun = null;
-    updateVaultActionButtons();
 }
 
 function toggleIncrementKicking(guildId: string) {
@@ -493,7 +454,7 @@ function toggleIncrementKicking(guildId: string) {
         showKickNotice("Increment kicking stopped", "No further batches will be sent.", "#5865f2");
         return;
     }
-    if (nukeInProgress) throw new Error("Wait for Nuke VC to finish first.");
+    if (nukeInProgress) throw new Error("Wait for the current VC kick to finish first.");
     const channelId = getMyVoiceChannelId(guildId);
     if (!channelId) throw new Error("Join the voice channel you own first.");
 
@@ -505,7 +466,6 @@ function toggleIncrementKicking(guildId: string) {
     stopIncrementKicking();
     const run: IncrementRun = { guildId, channelId, remaining, sent: 0, total: remaining.length };
     incrementRun = run;
-    updateVaultActionButtons();
     void sendIncrementBatch(run);
 }
 
@@ -527,7 +487,6 @@ async function sendIncrementBatch(run: IncrementRun) {
             run.remaining.splice(0, batch.length);
             run.sent += batch.length;
         }
-        updateVaultActionButtons();
         if (!run.remaining.length) {
             stopIncrementKicking();
             showKickNotice("Increment kicking finished", `Submitted bans for ${run.sent} vault users. Check the bot's replies for results.`, "#23a559");
@@ -542,19 +501,19 @@ async function sendIncrementBatch(run: IncrementRun) {
     }
 }
 
-async function nukeVc(guildId: string) {
-    if (nukeInProgress) throw new Error("Nuke VC is already running.");
+async function kickVoiceMembers(guildId: string, disconnectAfter = false) {
+    if (nukeInProgress) throw new Error("A VC kick is already running.");
     const channelId = getMyVoiceChannelId(guildId);
     if (!channelId) throw new Error("Join the voice channel you own first.");
     const targets = getVoiceMemberIds(channelId).filter(id => id !== getCurrentUserId());
+    if (!targets.length && !disconnectAfter) throw new Error("There is nobody else in your VC to kick.");
     stopIncrementKicking();
-    disableAutoKick("Nuke VC started");
+    if (disconnectAfter) disableAutoKick("Nuke VC started");
     nukeInProgress = true;
     const generation = ++nukeGeneration;
-    updateVaultActionButtons();
     const guard = () => {
         if (!nukeInProgress || generation !== nukeGeneration || getMyVoiceChannelId(guildId) !== channelId) {
-            throw new Error("Nuke VC stopped because you left or changed voice channels.");
+            throw new Error("VC kick stopped because you left or changed voice channels.");
         }
     };
     try {
@@ -575,14 +534,46 @@ async function nukeVc(guildId: string) {
             if (offset + 10 < targets.length) await sleep(15000);
         }
         guard();
-        await VoiceChannelActions.selectVoiceChannel(null);
-        showKickNotice("Nuke VC finished", `Removed ${targets.length} users and disconnected you.`, "#23a559");
+        if (disconnectAfter) await VoiceChannelActions.selectVoiceChannel(null);
+        showKickNotice(disconnectAfter ? "Nuke VC finished" : "Kick everyone in VC finished",
+            `Removed ${targets.length} users.${disconnectAfter ? " Disconnected you." : " You remain connected."}`, "#23a559");
     } finally {
         if (generation === nukeGeneration) {
             nukeInProgress = false;
-            updateVaultActionButtons();
         }
     }
+}
+
+function muteVoiceUsers(channelId: string) {
+    const targets = getVoiceMemberIds(channelId).filter(id => id !== getCurrentUserId());
+    let muted = 0;
+    for (const userId of targets) {
+        // Do not toggle people who are already muted back on.
+        if (!MediaEngineStore.isLocalMute(userId)) {
+            AudioActions.toggleLocalMute(userId);
+            muted++;
+        }
+    }
+    showKickNotice("Mute users", `Muted ${muted} users for you. ${targets.length - muted} were already muted.`, "#23a559");
+}
+
+async function addVoiceUsersToVault(channelId: string, guildId: string) {
+    const targets = getVoiceMemberIds(channelId).filter(id => id !== getCurrentUserId());
+    const vault = [...getVault()];
+    let added = 0;
+    for (const userId of targets) {
+        if (vault.some(entry => entry.userId === userId && entry.guildId === guildId)) continue;
+        vault.push({
+            userId,
+            guildId,
+            username: getCachedUserName(userId),
+            avatar: UserStore.getUser(userId)?.avatar,
+            addedAt: Date.now()
+        });
+        added++;
+    }
+    await saveVault(vault);
+    showKickNotice("Add SWF to Vault", `Added ${added} users. ${targets.length - added} were already in this server's vault.`, "#23a559");
 }
 
 function reportActionError(title: string, action: () => void | Promise<void>) {
@@ -958,7 +949,6 @@ function showVaultModal(guildId: string) {
     const addButton = makeButton("Add ID", "#5865f2");
     const importButton = makeButton("Import IDs", "#4f545c");
     const exportButton = makeButton("Export IDs", "#4f545c");
-    const batchKickButton = makeButton("Kick Up to 10 in VC (Once)", "#da373c");
 
     addRow.appendChild(addInput);
     addRow.appendChild(addButton);
@@ -967,22 +957,6 @@ function showVaultModal(guildId: string) {
 
     controls.appendChild(search);
     controls.appendChild(addRow);
-
-    const actionRow = document.createElement("div");
-    actionRow.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;";
-    const incrementButton = makeButton("Increment kicking: Off", "#5865f2");
-    incrementButton.id = "autochannel-increment-button";
-    incrementButton.dataset.guildId = guildId;
-    incrementButton.onclick = () => reportActionError("Increment kicking failed", () => toggleIncrementKicking(guildId));
-    const nukeButton = makeButton("Nuke VC", "#da373c");
-    nukeButton.id = "autochannel-nuke-button";
-    nukeButton.onclick = () => reportActionError("Nuke VC failed", () => nukeVc(guildId));
-    actionRow.append(incrementButton, batchKickButton, nukeButton);
-    const incrementStatus = document.createElement("div");
-    incrementStatus.id = "autochannel-increment-status";
-    incrementStatus.dataset.guildId = guildId;
-    incrementStatus.style.cssText = "font-size:12px;color:#b5bac1;";
-    controls.append(actionRow, incrementStatus);
 
     const body = document.createElement("div");
     body.className = "ak-vault-scroll";
@@ -1094,13 +1068,6 @@ function showVaultModal(guildId: string) {
 
     search.addEventListener("input", () => renderList(search.value));
 
-    batchKickButton.onclick = () => {
-        kickUpToTenVaultedUsers(guildId).catch(error => {
-            log("Batch kick failed:", error);
-            showKickNotice("Batch kick failed", error instanceof Error ? error.message : String(error));
-        });
-    };
-
     addButton.onclick = async () => {
         const result = await addToVaultById(addInput.value, guildId);
 
@@ -1144,7 +1111,6 @@ function showVaultModal(guildId: string) {
     });
 
     document.body.appendChild(backdrop);
-    updateVaultActionButtons();
     search.focus();
 
     renderList();
@@ -1224,7 +1190,7 @@ const userContextPatch: NavContextMenuPatchCallback = (children, props: any) => 
     const user = props?.user;
     if (!user?.id) return;
 
-    const guildId = SelectedGuildStore.getGuildId();
+    const guildId = props?.guildId || props?.channel?.guild_id || SelectedGuildStore.getGuildId();
     if (!guildId) return;
 
     const group = findGroupChildrenByChildId("copy-id", children) ?? children;
@@ -1255,37 +1221,35 @@ const userContextPatch: NavContextMenuPatchCallback = (children, props: any) => 
     );
 
     group.push(
+        <Menu.MenuItem
+            id="autochannel-nuke-vc"
+            label="Nuke VC"
+            color="danger"
+            disabled={nukeInProgress}
+            action={() => reportActionError("Nuke VC failed", () => kickVoiceMembers(guildId, true))}
+        />,
+        <Menu.MenuItem
+            id="autochannel-kick-everyone-vc"
+            label="Kick everyone in VC"
+            color="danger"
+            disabled={nukeInProgress}
+            action={() => reportActionError("Kick everyone in VC failed", () => kickVoiceMembers(guildId))}
+        />,
+        <Menu.MenuCheckboxItem
+            id="autochannel-increment-kicking"
+            label="Increment kicking"
+            checked={incrementRun?.guildId === guildId}
+            action={() => reportActionError("Increment kicking failed", () => toggleIncrementKicking(guildId))}
+        />
+    );
+
+    group.push(
         <Menu.MenuItem id="shitter-vault-parent" label="Shitter Vault">
             <Menu.MenuCheckboxItem
                 id="shitter-vault-auto-kick"
                 label="Auto kick"
                 checked={autoKickEnabled && autoKickGuildId === guildId}
                 action={() => toggleAutoKick(guildId)}
-            />
-
-            <Menu.MenuItem
-                id="shitter-vault-kick-ten"
-                label="Kick Up to 10 in VC (Once)"
-                color="danger"
-                action={() => kickUpToTenVaultedUsers(guildId).catch(error => {
-                    log("Batch kick failed:", error);
-                    showKickNotice("Batch kick failed", error instanceof Error ? error.message : String(error));
-                })}
-            />
-
-            <Menu.MenuCheckboxItem
-                id="shitter-vault-increment-kicking"
-                label="Increment kicking"
-                checked={incrementRun?.guildId === guildId}
-                action={() => reportActionError("Increment kicking failed", () => toggleIncrementKicking(guildId))}
-            />
-
-            <Menu.MenuItem
-                id="shitter-vault-nuke-vc"
-                label="Nuke VC"
-                color="danger"
-                disabled={nukeInProgress}
-                action={() => reportActionError("Nuke VC failed", () => nukeVc(guildId))}
             />
 
             <Menu.MenuItem
@@ -1307,6 +1271,27 @@ const userContextPatch: NavContextMenuPatchCallback = (children, props: any) => 
     );
 };
 
+const voiceChannelContextPatch: NavContextMenuPatchCallback = (children, props: any) => {
+    const channel = props?.channel;
+    // Guild voice and stage channels only; never text channels or DMs.
+    if (!channel?.guild_id || ![2, 13].includes(channel.type)) return;
+
+    children.push(
+        <Menu.MenuGroup>
+            <Menu.MenuItem
+                id="autochannel-mute-voice-users"
+                label="Mute users"
+                action={() => reportActionError("Mute users failed", () => muteVoiceUsers(channel.id))}
+            />
+            <Menu.MenuItem
+                id="autochannel-vault-swf"
+                label="Add SWF to Vault"
+                action={() => reportActionError("Add SWF to Vault failed", () => addVoiceUsersToVault(channel.id, channel.guild_id))}
+            />
+        </Menu.MenuGroup>
+    );
+};
+
 export default definePlugin({
     name: "AutochannelKick",
     description: "Adds Kick Shitter and Shitter Vault.",
@@ -1315,13 +1300,16 @@ export default definePlugin({
     patches: [{
         find: "#{intl::USER_PROFILE_ACCOUNT_POPOUT_BUTTON_A11Y_LABEL}",
         replacement: {
-            match: /children:\[(?=.{0,400}?accountContainerRef)/,
-            replace: "children:[$self.VaultPanelButton(arguments[0]),"
+            // The mute control is the JSX element whose first prop is
+            // accountContainerRef. Insert directly before that element.
+            match: /(\(0,\i\.jsx\)\(\i,\{accountContainerRef:)/,
+            replace: "$self.VaultPanelButton(arguments[0]),$1"
         }
     }],
 
     contextMenus: {
-        "user-context": userContextPatch
+        "user-context": userContextPatch,
+        "channel-context": voiceChannelContextPatch
     },
 
     VaultPanelButton: ErrorBoundary.wrap(VaultPanelButton, { noop: true }),
